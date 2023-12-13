@@ -1,5 +1,8 @@
+import csv
 import logging
+import os
 import sys
+
 from llama_index.llms import Ollama
 from llama_index.callbacks.base import CallbackManager
 from llama_index import (
@@ -7,19 +10,18 @@ from llama_index import (
     ServiceContext,
     StorageContext,
     VectorStoreIndex,
-    LLMPredictor
+    load_index_from_storage,
 )
 from llama_index.text_splitter import SentenceSplitter
 from llama_index.postprocessor.cohere_rerank import CohereRerank
 from llama_index.embeddings.cohereai import CohereEmbedding
 from configparser import ConfigParser
-import os
 from llama_index.retrievers import BaseRetriever, BM25Retriever
-from llama_index.postprocessor import SentenceTransformerRerank
 from llama_index.query_engine import RetrieverQueryEngine
+from llama_index.vector_stores import FaissVectorStore
+
 import chainlit as cl
-import csv
-from cohere import Client
+import faiss
 
 logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 logging.getLogger().handlers = []
@@ -27,54 +29,72 @@ logging.getLogger().addHandler(logging.StreamHandler(stream=sys.stdout))
 
 
 env_config = ConfigParser()
+
+
 # Retrieve the cohere api key from the environmental variables
 def read_config(parser: ConfigParser, location: str) -> None:
- assert parser.read(location), f"Could not read config {location}"
+    assert parser.read(location), f"Could not read config {location}"
+
+
 #
 CONFIG_FILE = os.path.join(".", ".env")
 read_config(env_config, CONFIG_FILE)
 cohere_api_key = env_config.get("cohere", "api_key").strip()
 os.environ["COHERE_API_KEY"] = cohere_api_key
-DATA_PATH="C:/Users/andrew/OneDrive - Entegration Inc/Projects/oracle/SOURCE_DOCUMENTS/"
-DB_PATH = "storage"
+DATA_PATH = (
+    "C:/Users/andrew/OneDrive - Entegration Inc/Projects/oracle/SOURCE_DOCUMENTS/"
+)
+DB_PATH = "./storage"
+
 
 @cl.on_chat_start
 async def start():
-
     # load documents
     documents = SimpleDirectoryReader(DATA_PATH).load_data()
 
     # initialize service context (set chunk size)
-    llm_predictor = LLMPredictor(
-        llm=Ollama(
-            temperature=0,
-            model="neural-chat",
-        )
+    llm = Ollama(
+        temperature=0,
+        model="neural-chat",
     )
+
     embed_model = CohereEmbedding(
-    cohere_api_key=os.getenv("COHERE_API_KEY"),
-    model_name="embed-english-v3.0",
-    input_type="search_query",
+        cohere_api_key=os.getenv("COHERE_API_KEY"),
+        model_name="embed-english-v3.0",
+        input_type="search_query",
     )
     service_context = ServiceContext.from_defaults(
-        llm_predictor=llm_predictor,
+        llm=llm,
         embed_model=embed_model,
-        text_splitter = SentenceSplitter(
-            separator="\n\n",
-            chunk_size=512,
-            chunk_overlap=30
+        text_splitter=SentenceSplitter(
+            separator="\n\n", chunk_size=512, chunk_overlap=30
         ),
-        callback_manager=CallbackManager([cl.LlamaIndexCallbackHandler()])
+        callback_manager=CallbackManager([cl.LlamaIndexCallbackHandler()]),
     )
+
     nodes = service_context.node_parser.get_nodes_from_documents(documents)
-    # initialize storage context (by default it's in-memory)
-    storage_context = StorageContext.from_defaults()
-    storage_context.docstore.add_documents(nodes)
-    index = VectorStoreIndex(
-        nodes,
-        storage_context=storage_context, 
-        service_context=service_context
-    )
+
+    if not os.path.exists(DB_PATH):
+        vector_store = FaissVectorStore(
+            faiss.IndexFlatL2(1024)
+        )  # cohere embeddings have 1024 dimensions
+
+        # initialize storage context (by default it's in-memory)
+        storage_context = StorageContext.from_defaults(vector_store=vector_store)
+        storage_context.docstore.add_documents(nodes)
+        index = VectorStoreIndex(
+            nodes, storage_context=storage_context, service_context=service_context
+        )
+        index.storage_context.persist(DB_PATH)
+    else:
+        vector_store = FaissVectorStore.from_persist_dir("./storage")
+        storage_context = StorageContext.from_defaults(
+            vector_store=vector_store, persist_dir="./storage"
+        )
+        index = load_index_from_storage(
+            storage_context, service_context=service_context
+        )
+
     # retireve the top N most similar nodes using embeddings
     vector_retriever = index.as_retriever(similarity_top_k=3)
     # retireve the top N most similar nodes using bm25
@@ -98,19 +118,11 @@ async def start():
                     all_nodes.append(n)
                     node_ids.add(n.node.node_id)
             return all_nodes
-    vector_tool = RetrieverTool.from_defaults(
-    retriever=vector_retriever,
-    description="Useful for retrieving specific context from Paul Graham essay on What I Worked On.",
-    )
-    keyword_tool = RetrieverTool.from_defaults(
-    retriever=keyword_retriever,
-    description="Useful for retrieving specific context from Paul Graham essay on What I Worked On (using entities mentioned in query)",
-    )    
+
     index.as_retriever(similarity_top_k=3)
     hybrid_retriever = HybridRetriever(vector_retriever, bm25_retriever)
 
     cohere_rerank = CohereRerank(api_key=os.getenv("COHERE_API_KEY"), top_n=6)
-
 
     query_engine = RetrieverQueryEngine.from_args(
         retriever=hybrid_retriever,
@@ -121,10 +133,12 @@ async def start():
     cl.user_session.set("query_engine", query_engine)
     await cl.Message(author="Seraphina", content="Hello! How may I help you? ").send()
 
+
 def log_chat(input_message, output_message):
-    with open('chatlog.csv', 'a', newline='') as csvfile:
+    with open("chatlog.csv", "a", newline="") as csvfile:
         writer = csv.writer(csvfile)
         writer.writerow([input_message.content, output_message.content])
+
 
 @cl.on_message
 async def main(message: cl.Message):
