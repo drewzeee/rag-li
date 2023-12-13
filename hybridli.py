@@ -112,11 +112,11 @@ async def start():
 
             # combine the two lists of nodes
             all_nodes = []
-            node_ids = set()
+            node_hashes = set()
             for n in bm25_nodes + vector_nodes:
-                if n.node.node_id not in node_ids:
+                if n.node.hash not in node_hashes:
                     all_nodes.append(n)
-                    node_ids.add(n.node.node_id)
+                    node_hashes.add(n.node.hash)
             return all_nodes
 
     index.as_retriever(similarity_top_k=3)
