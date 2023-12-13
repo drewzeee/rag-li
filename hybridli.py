@@ -85,7 +85,7 @@ async def start():
         index = VectorStoreIndex(
             nodes, storage_context=storage_context, service_context=service_context
         )
-        index.storage_context.persist(DB_PATH)
+        index.storage_context.persist(persist_dir=DB_PATH)
     else:
         vector_store = FaissVectorStore.from_persist_dir("./storage")
         storage_context = StorageContext.from_defaults(
